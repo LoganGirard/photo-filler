@@ -1,0 +1,80 @@
+name: Build & release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed by softprops/action-gh-release to create/update Releases
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: photo-filler-windows
+            artifact_paths: |
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+              src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          - os: macos-latest
+            target: universal-apple-darwin
+            artifact_name: photo-filler-macos
+            artifact_paths: |
+              src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # The GitHub macOS runner is Apple Silicon; we need the Intel target too
+      # so Tauri can lipo a universal binary that runs on both chips.
+      - name: Add macOS targets for universal build
+        if: matrix.os == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Add Windows MSVC target
+        if: matrix.os == 'windows-latest'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Build Tauri app (release)
+        run: npm run tauri build -- --target ${{ matrix.target }}
+
+      - name: Upload installers as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+
+      # Both matrix jobs upload to the same Release; the action is idempotent
+      # on the tag, so it merges files instead of overwriting.
+      - name: Attach to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_paths }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
